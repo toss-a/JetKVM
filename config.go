@@ -180,7 +180,7 @@ var (
 	defaultUsbConfig = usbgadget.Config{
 		VendorId:     "0x1d6b", //The Linux Foundation
 		ProductId:    "0x0104", //Multifunction Composite Gadget
-		SerialNumber: "",
+		SerialNumber: "CAFEBABE",
 		Manufacturer: "JetKVM",
 		Product:      "USB Emulation Device",
 	}
@@ -283,6 +283,13 @@ func LoadConfig() {
 		logger.Warn().Err(err).Msg("config file JSON parsing failed")
 		configSuccess.Set(0.0)
 		return
+	}
+
+	if loadedConfig.UsbConfig == nil {
+		loadedConfig.UsbConfig = &usbgadget.Config{}
+	}
+	if loadedConfig.UsbConfig.SerialNumber == "" {
+		loadedConfig.UsbConfig.SerialNumber = defaultConfig.UsbConfig.SerialNumber
 	}
 
 	// merge the user config with the default config
