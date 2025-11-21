@@ -1,6 +1,8 @@
 #ifndef VIDEO_DAEMON_VIDEO_H
 #define VIDEO_DAEMON_VIDEO_H
 
+#include <stdint.h>
+
 /**
  * @brief Initialize the video subsystem
  *
@@ -30,6 +32,13 @@ void video_start_streaming();
  * @brief Stop the video streaming
  */
 void video_stop_streaming();
+
+/**
+ * @brief Get the streaming status of the video
+ *
+ * @return uint8_t 1 if the video streaming is active, 2 if the video streaming is stopping, 0 otherwise
+ */
+uint8_t video_get_streaming_status();
 
 /**
  * @brief Set the quality factor of the video
