@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -600,10 +601,20 @@ func getBindAddress(listenPort int) string {
 func RunWebServer() {
 	r := setupRouter()
 
-	// Determine the binding address based on the config
-	bindAddress := getBindAddress(80) // default port
+	listenPort := 80 // default port
+	if p := os.Getenv("JETKVM_HTTP_PORT"); p != "" {
+		parsed, err := strconv.Atoi(p)
+		if err != nil || parsed <= 0 || parsed > 65535 {
+			logger.Warn().Str("JETKVM_HTTP_PORT", p).Msg("invalid port; falling back to 80")
+		} else {
+			listenPort = parsed
+		}
+	}
 
-	logger.Info().Str("bindAddress", bindAddress).Bool("loopbackOnly", config.LocalLoopbackOnly).Msg("Starting web server")
+	// Determine the binding address based on the config
+	bindAddress := getBindAddress(listenPort)
+
+	logger.Info().Str("bindAddress", bindAddress).Int("port", listenPort).Bool("loopbackOnly", config.LocalLoopbackOnly).Msg("Starting web server")
 	if err := r.Run(bindAddress); err != nil {
 		panic(err)
 	}

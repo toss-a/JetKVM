@@ -61,6 +61,20 @@ type KeyboardMacro struct {
 	SortOrder int                 `json:"sortOrder,omitempty"`
 }
 
+// VideoConfig centralizes video-related configuration to avoid top-level sprawl.
+type VideoConfig struct {
+    Backend       string `json:"backend"`        // "rv1106" or "uvc"
+    Device        string `json:"device"`         // e.g. "/dev/video0" (UVC only)
+    Width         int    `json:"width"`
+    Height        int    `json:"height"`
+    FPS           int    `json:"fps"`
+    Format        string `json:"format"`         // "MJPG" or "YUYV" (UVC)
+    Encoder       string `json:"encoder"`        // "x264" or "mpp"
+    BitrateKbps   int    `json:"bitrate_kbps"`
+    Keyint        int    `json:"keyint"`
+    RepeatHeaders bool   `json:"repeat_headers"`
+}
+
 func (m *KeyboardMacro) Validate() error {
 	if m.Name == "" {
 		return fmt.Errorf("macro name cannot be empty")
@@ -114,6 +128,13 @@ type Config struct {
 	VideoSleepAfterSec   int                  `json:"video_sleep_after_sec"`
 	VideoQualityFactor   float64              `json:"video_quality_factor"`
 	NativeMaxRestart     uint                 `json:"native_max_restart_attempts"`
+	// Controls whether JetKVM opens and maintains the hardware watchdog at
+	// /dev/watchdog. Disable to prevent system reboot when the process exits.
+	WatchdogEnabled      bool                 `json:"watchdog_enabled"`
+	// Optional: choose a specific UDC when multiple exist
+	UsbUDCOverride       string               `json:"usb_udc_override"`
+	// Grouped video configuration
+	Video                *VideoConfig         `json:"video"`
 }
 
 // GetUpdateAPIURL returns the update API URL
@@ -169,6 +190,18 @@ var (
 		Keyboard:      true,
 		MassStorage:   true,
 	}
+	defaultVideoConfig = VideoConfig{
+		Backend:       "rv1106",
+		Device:        "/dev/video1",
+		Width:         1280,
+		Height:        720,
+		FPS:           15,
+		Format:        "MJPG",
+		Encoder:       "x264",
+		BitrateKbps:   2000,
+		Keyint:        60,
+		RepeatHeaders: true,
+	}
 )
 
 func getDefaultConfig() Config {
@@ -197,6 +230,8 @@ func getDefaultConfig() Config {
 		}(),
 		DefaultLogLevel:    "WARN",
 		VideoQualityFactor: 1.0,
+		WatchdogEnabled:    true,
+		Video:              func() *VideoConfig { c := defaultVideoConfig; return &c }(),
 	}
 }
 

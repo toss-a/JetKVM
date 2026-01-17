@@ -52,7 +52,11 @@ func Main() {
 		Interface("app_version", appVersionLocal).
 		Msg("starting JetKVM")
 
-	go runWatchdog()
+	if config.WatchdogEnabled {
+		go runWatchdog()
+	} else {
+		watchdogLogger.Info().Msg("watchdog disabled by config; not arming /dev/watchdog")
+	}
 
 	// initialize usb gadget
 	setProcTitle("initUsbGadget")

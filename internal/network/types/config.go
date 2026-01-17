@@ -51,6 +51,8 @@ type NetworkConfig struct {
 	TimeSyncParallel        null.Int    `json:"time_sync_parallel,omitempty" default:"4"`
 	TimeSyncNTPServers      []string    `json:"time_sync_ntp_servers,omitempty" validate_type:"ipv4_or_ipv6" required_if:"TimeSyncOrdering=ntp_user_provided"`
 	TimeSyncHTTPUrls        []string    `json:"time_sync_http_urls,omitempty" validate_type:"url" required_if:"TimeSyncOrdering=http_user_provided"`
+	// If true, skip writing RTC after setting system time
+	TimeSyncSkipRTC         null.Bool   `json:"time_sync_skip_rtc,omitempty" default:"false"`
 }
 
 // GetMDNSMode returns the MDNS mode configuration

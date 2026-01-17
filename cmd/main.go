@@ -11,7 +11,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/erikdubbelboer/gspt"
 	"github.com/jetkvm/kvm"
 	"github.com/jetkvm/kvm/internal/diagnostics"
 	"github.com/jetkvm/kvm/internal/native"
@@ -33,14 +32,6 @@ func program() {
 	default:
 		kvm.Main()
 	}
-}
-
-func setProcTitle(status string) {
-	if status != "" {
-		status = " " + status
-	}
-	title := fmt.Sprintf("jetkvm: [supervisor]%s", status)
-	gspt.SetProcTitle(title)
 }
 
 func main() {

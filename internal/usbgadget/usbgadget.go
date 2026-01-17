@@ -50,6 +50,7 @@ type KeysDownState struct {
 type UsbGadget struct {
 	name          string
 	udc           string
+	udcDriverPath string
 	kvmGadgetPath string
 	configC1Path  string
 
@@ -94,6 +95,9 @@ type UsbGadget struct {
 
 	logSuppressionCounter map[string]int
 	logSuppressionLock    sync.Mutex
+
+	// Optional override for the UDC to bind to
+	udcOverride string
 }
 
 const configFSPath = "/sys/kernel/config"
@@ -103,10 +107,15 @@ var defaultLogger = logging.GetSubsystemLogger("usbgadget")
 
 // NewUsbGadget creates a new UsbGadget.
 func NewUsbGadget(name string, enabledDevices *Devices, config *Config, logger *zerolog.Logger) *UsbGadget {
-	return newUsbGadget(name, defaultGadgetConfig, enabledDevices, config, logger)
+	return newUsbGadget(name, defaultGadgetConfig, enabledDevices, config, "", logger)
 }
 
-func newUsbGadget(name string, configMap map[string]gadgetConfigItem, enabledDevices *Devices, config *Config, logger *zerolog.Logger) *UsbGadget {
+// NewUsbGadgetWithUDCOverride creates a new UsbGadget and sets a UDC override.
+func NewUsbGadgetWithUDCOverride(name string, enabledDevices *Devices, config *Config, udcOverride string, logger *zerolog.Logger) *UsbGadget {
+	return newUsbGadget(name, defaultGadgetConfig, enabledDevices, config, udcOverride, logger)
+}
+
+func newUsbGadget(name string, configMap map[string]gadgetConfigItem, enabledDevices *Devices, config *Config, udcOverride string, logger *zerolog.Logger) *UsbGadget {
 	if logger == nil {
 		logger = defaultLogger
 	}
@@ -146,6 +155,7 @@ func newUsbGadget(name string, configMap map[string]gadgetConfigItem, enabledDev
 		logSuppressionCounter: make(map[string]int),
 
 		absMouseAccumulatedWheelY: 0,
+		udcOverride:          udcOverride,
 	}
 	if err := g.Init(); err != nil {
 		logger.Error().Err(err).Msg("failed to init USB gadget")
