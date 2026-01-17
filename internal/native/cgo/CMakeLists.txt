@@ -9,7 +9,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(USE_RK "Build with Rockchip media SDK (RV1106)" ON)
 option(USE_LVGL "Build with LVGL UI (requires lvgl)" ON)
 
-# Rockchip SDK paths
+# Rockchip SDK paths (used only when USE_RK=ON)
 set(RK_SDK_BASE "/opt/jetkvm-native-buildkit")
 set(RK_MEDIA_OUTPUT "${RK_SDK_BASE}/media/out")
 set(RK_MEDIA_INCLUDE_PATH "${RK_MEDIA_OUTPUT}/include")
@@ -47,14 +47,29 @@ endif()
 file(GLOB_RECURSE sources CONFIGURE_DEPENDS "*.c" "ui/*.c")
 list(FILTER sources EXCLUDE REGEX "CMakeFiles.*CompilerId.*\\.c$")
 
-# When building UVC-only (no RK), drop rk-dependent implementation file video.c
-if(NOT USE_RK)
-    list(FILTER sources EXCLUDE REGEX "/video\\.c$")
-    list(APPEND sources ${CMAKE_CURRENT_SOURCE_DIR}/video_uvconly.c)
+# Build UVC-oriented video shim always, and exclude rv1106-specific video.c
+list(FILTER sources EXCLUDE REGEX "/video\\.c$")
+list(APPEND sources ${CMAKE_CURRENT_SOURCE_DIR}/video_uvconly.c)
+
+# 添加统一编码器框架（所有构建都需要）
+list(APPEND sources ${CMAKE_CURRENT_SOURCE_DIR}/video_encoder.c)
+list(APPEND sources ${CMAKE_CURRENT_SOURCE_DIR}/encoder_x264.c)
+
+if(USE_RK)
+    # Add MPP helpers for RK builds
+    # Drop legacy RK_MPI_VENC-style wrapper to avoid old headers
+    list(FILTER sources EXCLUDE REGEX "/enc_mpp\\.c$")
+    # 注意：保留enc_mpp2.c暂时不删除，可能有其他用途
+    # list(APPEND sources ${CMAKE_CURRENT_SOURCE_DIR}/enc_mpp2.c)
+    list(APPEND sources ${CMAKE_CURRENT_SOURCE_DIR}/dec_mppjpeg.c)
+    # 添加MPP编码器实现
+    list(APPEND sources ${CMAKE_CURRENT_SOURCE_DIR}/encoder_mpp.c)
 else()
-    # RK build: exclude UVC backend and UVC-only shim
-    list(FILTER sources EXCLUDE REGEX "/uvc_backend\\.c$")
-    list(FILTER sources EXCLUDE REGEX "/video_uvconly\\.c$")
+    # UVC-only build: drop any MPP-specific sources from the glob
+    list(FILTER sources EXCLUDE REGEX "/enc_mpp2?\\.c$")
+    list(FILTER sources EXCLUDE REGEX "/dec_mppjpeg\\.c$")
+    list(FILTER sources EXCLUDE REGEX "/enc_mpp\\.c$")
+    list(FILTER sources EXCLUDE REGEX "/encoder_mpp\\.c$")
 endif()
 
 # When not using LVGL, drop UI and lvgl-dependent sources and use ctrl_stub
@@ -78,7 +93,9 @@ if(USE_RK)
     target_include_directories(jknative PRIVATE
         ${RK_MEDIA_INCLUDE_PATH}
         ${RK_MEDIA_INCLUDE_PATH}/libdrm
+        /usr/include/rockchip
     )
+    target_compile_definitions(jknative PRIVATE JETKVM_HAVE_MPP=1)
 endif()
 
 # Set library search path
@@ -88,9 +105,8 @@ endif()
 # target_link_directories(jknative PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/deps/libgpiod/lib)
 
 target_link_libraries(jknative PRIVATE pthread m)
-if(NOT USE_RK)
-    target_link_libraries(jknative PRIVATE x264 turbojpeg)
-endif()
+# x264和turbojpeg对所有构建都需要（UVC后端）
+target_link_libraries(jknative PRIVATE x264 turbojpeg)
 if(USE_LVGL)
     target_link_libraries(jknative PRIVATE lvgl::lvgl)
 endif()
