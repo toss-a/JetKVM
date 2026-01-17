@@ -2,6 +2,7 @@ package kvm
 
 import (
 	"bufio"
+	"errors"
 	"io"
 	"strconv"
 	"strings"
@@ -14,8 +15,12 @@ import (
 const serialPortPath = "/dev/ttyS3"
 
 var port serial.Port
+var ErrSerialUnavailable = errors.New("serial port unavailable")
 
 func mountATXControl() error {
+	if port == nil {
+		return ErrSerialUnavailable
+	}
 	_ = port.SetMode(defaultMode)
 	go runATXControl()
 
@@ -85,6 +90,9 @@ func runATXControl() {
 }
 
 func pressATXPowerButton(duration time.Duration) error {
+	if port == nil {
+		return ErrSerialUnavailable
+	}
 	_, err := port.Write([]byte("\n"))
 	if err != nil {
 		return err
@@ -106,6 +114,9 @@ func pressATXPowerButton(duration time.Duration) error {
 }
 
 func pressATXResetButton(duration time.Duration) error {
+	if port == nil {
+		return ErrSerialUnavailable
+	}
 	_, err := port.Write([]byte("\n"))
 	if err != nil {
 		return err
@@ -127,6 +138,9 @@ func pressATXResetButton(duration time.Duration) error {
 }
 
 func mountDCControl() error {
+	if port == nil {
+		return ErrSerialUnavailable
+	}
 	_ = port.SetMode(defaultMode)
 	registerDCMetrics()
 	go runDCControl()
@@ -217,6 +231,9 @@ func runDCControl() {
 }
 
 func setDCPowerState(on bool) error {
+	if port == nil {
+		return ErrSerialUnavailable
+	}
 	_, err := port.Write([]byte("\n"))
 	if err != nil {
 		return err
@@ -233,6 +250,9 @@ func setDCPowerState(on bool) error {
 }
 
 func setDCRestoreState(state int) error {
+	if port == nil {
+		return ErrSerialUnavailable
+	}
 	_, err := port.Write([]byte("\n"))
 	if err != nil {
 		return err
@@ -275,11 +295,14 @@ func reopenSerialPort() error {
 	var err error
 	port, err = serial.Open(serialPortPath, defaultMode)
 	if err != nil {
+		// keep port nil on failure and propagate error
+		port = nil
 		serialLogger.Error().
 			Err(err).
 			Str("path", serialPortPath).
 			Interface("mode", defaultMode).
 			Msg("Error opening serial port")
+		return err
 	}
 	return nil
 }
@@ -291,6 +314,21 @@ func handleSerialChannel(d *webrtc.DataChannel) {
 	d.OnOpen(func() {
 		go func() {
 			if port == nil {
+				return
+			}
+			defer func() {
+				if r := recover(); r != nil {
+					scopedLogger.Error().Interface("panic", r).Msg("Recovered in serial reader loop")
+				}
+			}()
+
+			// Ensure serial port is available before starting the read loop
+			if port == nil {
+				_ = reopenSerialPort()
+			}
+			if port == nil {
+				scopedLogger.Warn().Msg("Serial port unavailable; closing serial data channel")
+				_ = d.Close()
 				return
 			}
 

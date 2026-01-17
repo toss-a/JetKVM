@@ -12,12 +12,22 @@ var gadget *usbgadget.UsbGadget
 // initUsbGadget initializes the USB gadget.
 // call it only after the config is loaded.
 func initUsbGadget() {
-	gadget = usbgadget.NewUsbGadget(
-		"jetkvm",
-		config.UsbDevices,
-		config.UsbConfig,
-		usbLogger,
-	)
+	if config.UsbUDCOverride != "" {
+		gadget = usbgadget.NewUsbGadgetWithUDCOverride(
+			"jetkvm",
+			config.UsbDevices,
+			config.UsbConfig,
+			config.UsbUDCOverride,
+			usbLogger,
+		)
+	} else {
+		gadget = usbgadget.NewUsbGadget(
+			"jetkvm",
+			config.UsbDevices,
+			config.UsbConfig,
+			usbLogger,
+		)
+	}
 
 	go func() {
 		for {

@@ -17,7 +17,7 @@ type UsbGadgetTransaction struct {
 	// below are the fields that are needed to be set by the caller
 	log                       *zerolog.Logger
 	udc                       string
-	dwc3Path                  string
+	udcDriverPath             string
 	kvmGadgetPath             string
 	configC1Path              string
 	orderedConfigItems        orderedGadgetConfigItems
@@ -40,7 +40,7 @@ func (u *UsbGadget) newUsbGadgetTransaction(lock bool) error {
 		c:                         &ChangeSet{},
 		log:                       u.log,
 		udc:                       u.udc,
-		dwc3Path:                  dwc3Path,
+		udcDriverPath:             u.udcDriverPath,
 		kvmGadgetPath:             u.kvmGadgetPath,
 		configC1Path:              u.configC1Path,
 		orderedConfigItems:        u.getOrderedConfigItems(),
@@ -331,7 +331,7 @@ func (tx *UsbGadgetTransaction) WriteUDC() {
 func (tx *UsbGadgetTransaction) RebindUsb(ignoreUnbindError bool) {
 	// remove the gadget from the UDC
 	tx.addFileChange("udc", RequestedFileChange{
-		Path:            path.Join(tx.dwc3Path, "unbind"),
+		Path:            path.Join(tx.udcDriverPath, "unbind"),
 		ExpectedState:   FileStateFileWrite,
 		ExpectedContent: []byte(tx.udc),
 		Description:     "unbind UDC",
@@ -340,10 +340,10 @@ func (tx *UsbGadgetTransaction) RebindUsb(ignoreUnbindError bool) {
 	})
 	// bind the gadget to the UDC
 	tx.addFileChange("udc", RequestedFileChange{
-		Path:            path.Join(tx.dwc3Path, "bind"),
+		Path:            path.Join(tx.udcDriverPath, "bind"),
 		ExpectedState:   FileStateFileWrite,
 		ExpectedContent: []byte(tx.udc),
 		Description:     "bind UDC",
-		DependsOn:       []string{path.Join(tx.dwc3Path, "unbind")},
+		DependsOn:       []string{path.Join(tx.udcDriverPath, "unbind")},
 	})
 }
