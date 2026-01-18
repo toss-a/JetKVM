@@ -53,7 +53,7 @@
       "domain": null,
       "ipv4_mode": "dhcp",
       "ipv6_mode": "slaac",
-      "lldp_mode": "enabled",
+      "lldp_mode": "all",
       "lldp_tx_tlvs": ["chassis","port","system","vlan"],
       "mdns_mode": "auto",
       "time_sync_mode": "http_only",
