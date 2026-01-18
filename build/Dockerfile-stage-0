@@ -20,7 +20,7 @@ RUN if [ "${TARGETARCH}" = "arm64" ]; then \
         export COMMON_CFLAGS='-O2 -pipe -fPIC -fstack-protector-strong -D_FORTIFY_SOURCE=2'; \
         export CFLAGS="$COMMON_CFLAGS -march=armv8-a"; \
         export CXXFLAGS="$CFLAGS"; \
-        git clone --depth=1 https://github.com/rockchip-linux/mpp.git /tmp/rkmpp; \
+        git clone --depth=1 https://github.com/HermanChen/mpp.git /tmp/rkmpp; \
         mkdir -p /tmp/rkmpp/rkmpp_build && cd /tmp/rkmpp/rkmpp_build; \
         cmake -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_TEST=OFF \
                -DCMAKE_C_FLAGS_RELEASE="$CFLAGS" -DCMAKE_CXX_FLAGS_RELEASE="$CXXFLAGS" ..; \
