@@ -47,8 +47,6 @@ endif()
 # Get source files, excluding CMake generated files
 file(GLOB_RECURSE sources CONFIGURE_DEPENDS "*.c" "ui/*.c")
 list(FILTER sources EXCLUDE REGEX "CMakeFiles.*CompilerId.*\\.c$")
-# Exclude main.c from library sources (it's used for the binary target)
-list(FILTER sources EXCLUDE REGEX "main\\.c$")
 
 # Build UVC-oriented video shim always, and exclude rv1106-specific video.c
 list(FILTER sources EXCLUDE REGEX "/video\\.c$")
@@ -98,7 +96,9 @@ if(USE_RK)
         ${RK_MEDIA_INCLUDE_PATH}/libdrm
         /usr/include/rockchip
     )
-    target_compile_definitions(jknative PRIVATE JETKVM_HAVE_MPP=1)
+    target_compile_definitions(jknative PRIVATE 
+        JETKVM_HAVE_MPP=1
+    )
 endif()
 
 # libyuv for accelerated format conversion (required)
@@ -194,14 +194,4 @@ if(USE_LVGL)
     target_link_libraries(jknative PRIVATE lvgl::lvgl)
 endif()
 
-# Binary target using main.c as entry point
-add_executable(jknative-bin ${CMAKE_CURRENT_SOURCE_DIR}/main.c)
-
-# Link the binary to the library (if needed in the future)
-target_link_libraries(jknative-bin PRIVATE
-    jknative
-    pthread
-)
-
 install(TARGETS jknative DESTINATION lib)
-install(TARGETS jknative-bin DESTINATION bin)

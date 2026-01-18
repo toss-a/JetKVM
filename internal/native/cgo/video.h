@@ -1,6 +1,8 @@
 #ifndef VIDEO_DAEMON_VIDEO_H
 #define VIDEO_DAEMON_VIDEO_H
 
+#include <stdint.h>
+
 /**
  * @brief Initialize the video subsystem
  *

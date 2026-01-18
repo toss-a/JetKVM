@@ -1,6 +1,7 @@
 #include "uvc_backend.h"
 #include "video.h"
 #include "log.h"
+#include <stdint.h>
 
 static float quality_factor = 1.0f; // placeholder (not used in UVC-only)
 
