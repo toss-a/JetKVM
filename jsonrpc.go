@@ -698,21 +698,42 @@ func rpcSetActiveExtension(extensionId string) error {
 	if config.ActiveExtension == extensionId {
 		return nil
 	}
-	switch config.ActiveExtension {
+	previousExtension := config.ActiveExtension
+	switch previousExtension {
 	case "atx-power":
-		_ = unmountATXControl()
+		if err := unmountConfiguredATXControl(); err != nil {
+			return fmt.Errorf("failed to unmount ATX control: %w", err)
+		}
 	case "dc-power":
 		_ = unmountDCControl()
 	}
+
+	var mountErr error
+	switch extensionId {
+	case "atx-power":
+		mountErr = mountConfiguredATXControl()
+	case "dc-power":
+		mountErr = mountDCControl()
+	case "":
+		// nothing to mount
+	}
+	if mountErr != nil {
+		switch previousExtension {
+		case "atx-power":
+			if err := mountConfiguredATXControl(); err != nil {
+				logger.Warn().Err(err).Msg("failed to restore previous ATX extension after mount failure")
+			}
+		case "dc-power":
+			if err := mountDCControl(); err != nil {
+				logger.Warn().Err(err).Msg("failed to restore previous DC extension after mount failure")
+			}
+		}
+		return fmt.Errorf("failed to mount %s: %w", extensionId, mountErr)
+	}
+
 	config.ActiveExtension = extensionId
 	if err := SaveConfig(); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
-	}
-	switch extensionId {
-	case "atx-power":
-		_ = mountATXControl()
-	case "dc-power":
-		_ = mountDCControl()
 	}
 	return nil
 }

@@ -16,6 +16,14 @@ const serialPortPath = "/dev/ttyS3"
 
 var port serial.Port
 var ErrSerialUnavailable = errors.New("serial port unavailable")
+var ErrATXUnavailable = errors.New("atx control unavailable")
+
+const (
+	atxDriverSerial = "serial"
+	atxDriverGPIO   = "gpio"
+)
+
+var currentATXDriver string
 
 func mountATXControl() error {
 	if port == nil {
@@ -38,6 +46,56 @@ var (
 	btnRSTState bool
 	btnPWRState bool
 )
+
+func configuredATXDriver() string {
+	if config == nil || config.ATX == nil {
+		return atxDriverSerial
+	}
+	driver := strings.TrimSpace(strings.ToLower(config.ATX.Driver))
+	if driver == atxDriverGPIO {
+		return atxDriverGPIO
+	}
+	return atxDriverSerial
+}
+
+func runtimeATXDriver() string {
+	if currentATXDriver != "" {
+		return currentATXDriver
+	}
+	return configuredATXDriver()
+}
+
+func mountConfiguredATXControl() error {
+	driver := configuredATXDriver()
+	switch driver {
+	case atxDriverGPIO:
+		if err := mountGPIOATXControl(); err != nil {
+			return err
+		}
+	default:
+		driver = atxDriverSerial
+		if err := mountATXControl(); err != nil {
+			return err
+		}
+	}
+	currentATXDriver = driver
+	return nil
+}
+
+func unmountConfiguredATXControl() error {
+	driver := currentATXDriver
+	if driver == "" {
+		driver = configuredATXDriver()
+	}
+	var err error
+	if driver == atxDriverGPIO {
+		err = unmountGPIOATXControl()
+	} else {
+		err = unmountATXControl()
+	}
+	currentATXDriver = ""
+	return err
+}
 
 func runATXControl() {
 	scopedLogger := serialLogger.With().Str("service", "atx_control").Logger()
@@ -90,6 +148,20 @@ func runATXControl() {
 }
 
 func pressATXPowerButton(duration time.Duration) error {
+	if runtimeATXDriver() == atxDriverGPIO {
+		return gpioPressATXPowerButton(duration)
+	}
+	return serialPressATXPowerButton(duration)
+}
+
+func pressATXResetButton(duration time.Duration) error {
+	if runtimeATXDriver() == atxDriverGPIO {
+		return gpioPressATXResetButton(duration)
+	}
+	return serialPressATXResetButton(duration)
+}
+
+func serialPressATXPowerButton(duration time.Duration) error {
 	if port == nil {
 		return ErrSerialUnavailable
 	}
@@ -113,7 +185,7 @@ func pressATXPowerButton(duration time.Duration) error {
 	return nil
 }
 
-func pressATXResetButton(duration time.Duration) error {
+func serialPressATXResetButton(duration time.Duration) error {
 	if port == nil {
 		return ErrSerialUnavailable
 	}
@@ -282,7 +354,9 @@ func initSerialPort() {
 	_ = reopenSerialPort()
 	switch config.ActiveExtension {
 	case "atx-power":
-		_ = mountATXControl()
+		if err := mountConfiguredATXControl(); err != nil {
+			serialLogger.Warn().Err(err).Msg("failed to mount ATX control")
+		}
 	case "dc-power":
 		_ = mountDCControl()
 	}
