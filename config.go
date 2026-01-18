@@ -136,6 +136,17 @@ type Config struct {
 	UsbUDCOverride       string               `json:"usb_udc_override"`
 	// Grouped video configuration
 	Video                *VideoConfig         `json:"video"`
+	// Local WebRTC ICE when not using cloud signaling
+	LocalIceServers      []IceServer            `json:"local_ice_servers,omitempty"`
+}
+
+// IceServer is a minimal JSON-configurable representation of an ICE server
+// (STUN/TURN) used in local/non-cloud mode. It intentionally mirrors the
+// browser RTCIceServer shape so the UI can reuse it directly.
+type IceServer struct {
+    URLs       []string `json:"urls"`
+    Username   string   `json:"username,omitempty"`
+    Credential string   `json:"credential,omitempty"`
 }
 
 // GetUpdateAPIURL returns the update API URL

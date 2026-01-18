@@ -119,12 +119,16 @@ type hidQueueMessage struct {
 }
 
 type SessionConfig struct {
-	ICEServers []string
-	LocalIP    string
-	IsCloud    bool
-	ws         *websocket.Conn
-	Logger     *zerolog.Logger
-	MDNSMode   string
+	ICEServers    []string
+	ICEServerURLs []string
+	LocalIP       string
+	IsCloud       bool
+	ws            *websocket.Conn
+	Logger        *zerolog.Logger
+	MDNSMode      string
+
+	LocalICEServers []IceServer
+	LocalNAT1To1IP  string
 }
 
 func (s *Session) ExchangeOffer(offerStr string) (string, error) {
@@ -267,7 +271,7 @@ func newSession(config SessionConfig) (*Session, error) {
 		webrtcSettingEngine.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
 	}
 
-	iceServer := webrtc.ICEServer{}
+	iceServers := []webrtc.ICEServer{}
 
 	var scopedLogger *zerolog.Logger
 	if config.Logger != nil {
@@ -278,11 +282,15 @@ func newSession(config SessionConfig) (*Session, error) {
 	}
 
 	if config.IsCloud {
-		if config.ICEServers == nil {
+		iceURLs := config.ICEServerURLs
+		if iceURLs == nil {
+			iceURLs = config.ICEServers
+		}
+		if iceURLs == nil {
 			scopedLogger.Info().Msg("ICE Servers not provided by cloud")
 		} else {
-			iceServer.URLs = config.ICEServers
-			scopedLogger.Info().Interface("iceServers", iceServer.URLs).Msg("Using ICE Servers provided by cloud")
+			iceServers = append(iceServers, webrtc.ICEServer{URLs: iceURLs})
+			scopedLogger.Info().Interface("iceServers", iceURLs).Msg("Using ICE Servers provided by cloud")
 		}
 
 		if config.LocalIP == "" || net.ParseIP(config.LocalIP) == nil {
@@ -302,11 +310,30 @@ func newSession(config SessionConfig) (*Session, error) {
 				scopedLogger.Info().Str("localIP", config.LocalIP).Msg("Set ICEAddressRewriteRules for local IP")
 			}
 		}
+	} else {
+		if len(config.LocalICEServers) > 0 {
+			for _, s := range config.LocalICEServers {
+				if len(s.URLs) == 0 {
+					continue
+				}
+				iceServers = append(iceServers, webrtc.ICEServer{
+					URLs:       s.URLs,
+					Username:   s.Username,
+					Credential: s.Credential,
+				})
+			}
+			scopedLogger.Info().Interface("iceServers", iceServers).Msg("Using ICE Servers from local config")
+		}
+
+		if config.LocalNAT1To1IP != "" && net.ParseIP(config.LocalNAT1To1IP) != nil {
+			webrtcSettingEngine.SetNAT1To1IPs([]string{config.LocalNAT1To1IP}, webrtc.ICECandidateTypeSrflx)
+			scopedLogger.Info().Str("localNAT1To1IP", config.LocalNAT1To1IP).Msg("Setting NAT1To1IPs (local)")
+		}
 	}
 
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(webrtcSettingEngine))
 	peerConnection, err := api.NewPeerConnection(webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{iceServer},
+		ICEServers: iceServers,
 	})
 	if err != nil {
 		scopedLogger.Warn().Err(err).Msg("Failed to create PeerConnection")

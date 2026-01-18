@@ -452,9 +452,11 @@ func handleSessionRequest(
 		ws:         c,
 		IsCloud:    isCloudConnection,
 		LocalIP:    req.IP,
-		ICEServers: req.ICEServers,
+		ICEServerURLs:    req.ICEServers,
 		Logger:     scopedLogger,
 		MDNSMode:   config.NetworkConfig.MDNSMode.String,
+		LocalICEServers:  config.LocalIceServers,
+		LocalNAT1To1IP:   "", // optional: can be exposed later via config
 	})
 	if err != nil {
 		_ = wsjson.Write(context.Background(), c, gin.H{"error": err})
