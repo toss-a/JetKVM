@@ -116,6 +116,7 @@ type Config struct {
 	KeyboardLayout       string               `json:"keyboard_layout"`
 	EdidString           string               `json:"hdmi_edid_string"`
 	ActiveExtension      string               `json:"active_extension"`
+	ATX                  *ATXConfig           `json:"atx"`
 	DisplayRotation      string               `json:"display_rotation"`
 	DisplayMaxBrightness int                  `json:"display_max_brightness"`
 	DisplayDimAfterSec   int                  `json:"display_dim_after_sec"`
@@ -144,6 +145,20 @@ func (c *Config) GetUpdateAPIURL() string {
 	}
 	return strings.TrimSuffix(c.UpdateAPIURL, "/") + "/releases"
 }
+
+type ATXConfig struct {
+	Driver string         `json:"driver"`
+	GPIO   *ATXGPIOConfig `json:"gpio"`
+}
+
+type ATXGPIOConfig struct {
+	PowerButtonPin   string `json:"power_button_pin"`
+	ResetButtonPin   string `json:"reset_button_pin"`
+	PowerLedPin      string `json:"power_led_pin"`
+	HddLedPin        string `json:"hdd_led_pin"`
+	OutputActiveHigh bool   `json:"output_active_high"`
+}
+
 
 // GetDisplayRotation returns the display rotation
 func (c *Config) GetDisplayRotation() uint16 {
@@ -190,6 +205,13 @@ var (
 		Keyboard:      true,
 		MassStorage:   true,
 	}
+	defaultATXGPIOConfig = ATXGPIOConfig{
+		OutputActiveHigh: true,
+	}
+	defaultATXConfig = ATXConfig{
+		Driver: "serial",
+		GPIO:   &defaultATXGPIOConfig,
+	}
 	defaultVideoConfig = VideoConfig{
 		Backend:       "rv1106",
 		Device:        "/dev/video1",
@@ -223,6 +245,14 @@ func getDefaultConfig() Config {
 		TLSMode:       "",
 		UsbConfig:     func() *usbgadget.Config { c := defaultUsbConfig; return &c }(),
 		UsbDevices:    func() *usbgadget.Devices { c := defaultUsbDevices; return &c }(),
+		ATX: func() *ATXConfig {
+			c := defaultATXConfig
+			if c.GPIO != nil {
+				gpio := *c.GPIO
+				c.GPIO = &gpio
+			}
+			return &c
+		}(),
 		NetworkConfig: func() *types.NetworkConfig {
 			c := &types.NetworkConfig{}
 			_ = confparser.SetDefaultsAndValidate(c)
@@ -307,6 +337,12 @@ func LoadConfig() {
 
 	if loadedConfig.JigglerConfig == nil {
 		loadedConfig.JigglerConfig = getDefaultConfig().JigglerConfig
+	}
+
+	if loadedConfig.ATX == nil {
+		loadedConfig.ATX = getDefaultConfig().ATX
+	} else if loadedConfig.ATX.GPIO == nil {
+		loadedConfig.ATX.GPIO = getDefaultConfig().ATX.GPIO
 	}
 
 	// fixup old keyboard layout value
