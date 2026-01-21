@@ -14,6 +14,7 @@ typedef struct {
     int width;
     int height;
     int initialized;
+    int pic_allocated;
 } x264_encoder_ctx_t;
 
 static int x264_encoder_init(const encoder_config_t *config, void **ctx)
@@ -65,13 +66,10 @@ static int x264_encoder_init(const encoder_config_t *config, void **ctx)
         return -1;
     }
     
-    // 分配图像结构
-    if (x264_picture_alloc(&enc->pic_in, X264_CSP_I420, config->width, config->height) < 0) {
-        log_error("x264: x264_picture_alloc failed");
-        x264_encoder_close(enc->encoder);
-        free(enc);
-        return -1;
-    }
+    // 使用外部帧缓冲，不分配内部图像缓冲
+    x264_picture_init(&enc->pic_in);
+    enc->pic_in.img.i_csp = X264_CSP_I420;
+    enc->pic_allocated = 0;
     
     enc->width = config->width;
     enc->height = config->height;
@@ -266,7 +264,9 @@ static void x264_encoder_destroy(void **ctx)
             x264_encoder_close(enc->encoder);
             enc->encoder = NULL;
         }
-        x264_picture_clean(&enc->pic_in);
+        if (enc->pic_allocated) {
+            x264_picture_clean(&enc->pic_in);
+        }
         enc->initialized = 0;
     }
     
@@ -291,4 +291,3 @@ const encoder_ops_t* encoder_get_x264_ops(void)
 {
     return &x264_ops;
 }
-

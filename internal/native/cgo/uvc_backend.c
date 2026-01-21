@@ -37,7 +37,9 @@ static struct uvc_buf *uvc_buffers = NULL;
 static int uvc_nbufs = 0;
 static pthread_t uvc_thread;
 static int uvc_running = 0;
+static int uvc_thread_started = 0;
 static pthread_mutex_t uvc_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int uvc_initialized = 0;
 
 // JPEG decoder
 static tjhandle tj = NULL;
@@ -48,6 +50,10 @@ static unsigned char *yuv_src = NULL;
 static size_t yuv_src_size = 0;
 static int mjpeg_subsamp = -1; // TJSAMP_*
 static int mjpeg_colorspace = -1;
+static int tj_fail_count = 0;
+static int tj_fail_threshold = 20;
+static int uvc_warmup_frames_default = 8;
+static int uvc_warmup_frames = 0;
 
 // 统一编码器接口
 static const encoder_ops_t *encoder = NULL;
@@ -88,6 +94,86 @@ static void warn_tj_once_per_sec() {
         log_warn("UVC: tjDecompressToYUV2 failed");
     }
     last = now; suppressed = 0;
+}
+
+static void warn_uvc_once_per_sec(const char *msg) {
+    static time_t last = 0;
+    static int suppressed = 0;
+    time_t now = time(NULL);
+    if (now == last) { suppressed++; return; }
+    if (suppressed > 0) {
+        log_warn("UVC: %s (suppressed %d)", msg, suppressed);
+    } else {
+        log_warn("UVC: %s", msg);
+    }
+    last = now; suppressed = 0;
+}
+
+static int find_jpeg_start(const unsigned char *buf, size_t size) {
+    if (!buf || size < 2) {
+        return -1;
+    }
+
+    // Check for a UVC payload header length and a SOI marker right after it.
+    unsigned int hdr_len = buf[0];
+    if (hdr_len >= 2 && hdr_len <= 64 && hdr_len + 1 < size) {
+        if (buf[hdr_len] == 0xFF && buf[hdr_len + 1] == 0xD8) {
+            return (int)hdr_len;
+        }
+    }
+
+    // Fallback: scan the first 512 bytes for JPEG SOI.
+    size_t limit = size < 512 ? size : 512;
+    for (size_t i = 0; i + 1 < limit; i++) {
+        if (buf[i] == 0xFF && buf[i + 1] == 0xD8) {
+            return (int)i;
+        }
+    }
+
+    return -1;
+}
+
+static int has_jpeg_eoi(const unsigned char *buf, size_t size) {
+    if (!buf || size < 2) {
+        return 0;
+    }
+    size_t start = size > 512 ? size - 512 : 0;
+    for (size_t i = size - 2;; i--) {
+        if (buf[i] == 0xFF && buf[i + 1] == 0xD9) {
+            return 1;
+        }
+        if (i == start) {
+            break;
+        }
+    }
+    return 0;
+}
+
+static int init_turbojpeg_handle() {
+    if (!tj) {
+        tj = tjInitDecompress();
+        if (!tj) {
+            log_error("UVC: tjInitDecompress failed");
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static void reset_turbojpeg_state(const char *reason) {
+    log_warn("UVC: resetting TurboJPEG decoder (%s)", reason ? reason : "unknown");
+    if (tj) {
+        tjDestroy(tj);
+        tj = NULL;
+    }
+    if (yuv_src) { free(yuv_src); yuv_src = NULL; }
+    yuv_src_size = 0;
+    mjpeg_subsamp = -1;
+    mjpeg_colorspace = -1;
+    tj_fail_count = 0;
+    uvc_warmup_frames = 0;
+    tj_fail_count = 0;
+    (void)init_turbojpeg_handle();
 }
 
 
@@ -204,15 +290,15 @@ static int uvc_init_mmap() {
 }
 
 static int init_turbojpeg() {
-    tj = tjInitDecompress();
-    if (!tj) {
-        log_error("UVC: tjInitDecompress failed");
+    if (init_turbojpeg_handle() < 0) {
         return -1;
     }
     // allocate yuv buffer for I420 with minimal padding (1)
-    yuv_buf_size = (size_t)uvc_width * (size_t)uvc_height * 3 / 2;
-    yuv_buf = (unsigned char*)malloc(yuv_buf_size);
-    if (!yuv_buf) return -1;
+    if (!yuv_buf) {
+        yuv_buf_size = (size_t)uvc_width * (size_t)uvc_height * 3 / 2;
+        yuv_buf = (unsigned char*)malloc(yuv_buf_size);
+        if (!yuv_buf) return -1;
+    }
     return 0;
 }
 
@@ -318,6 +404,9 @@ static void* uvc_thread_main(void* arg) {
         if (r == -1) {
             if (errno == EINTR) continue;
             log_error("UVC: select failed: %s", strerror(errno));
+            pthread_mutex_lock(&uvc_mutex);
+            uvc_running = 0;
+            pthread_mutex_unlock(&uvc_mutex);
             break;
         } else if (r == 0) {
             continue; // timeout
@@ -329,7 +418,50 @@ static void* uvc_thread_main(void* arg) {
         if (xioctl(uvc_fd, VIDIOC_DQBUF, &buf) < 0) {
             if (errno == EAGAIN) continue;
             log_error("UVC: VIDIOC_DQBUF failed: %s", strerror(errno));
+            pthread_mutex_lock(&uvc_mutex);
+            uvc_running = 0;
+            pthread_mutex_unlock(&uvc_mutex);
             break;
+        }
+        if (!uvc_buffers || buf.index >= (uint32_t)uvc_nbufs) {
+            log_error("UVC: invalid buffer index %u (nbufs=%d)", buf.index, uvc_nbufs);
+            pthread_mutex_lock(&uvc_mutex);
+            uvc_running = 0;
+            pthread_mutex_unlock(&uvc_mutex);
+            break;
+        }
+        if (!uvc_buffers[buf.index].start) {
+            log_error("UVC: buffer %u has NULL start pointer", buf.index);
+            pthread_mutex_lock(&uvc_mutex);
+            uvc_running = 0;
+            pthread_mutex_unlock(&uvc_mutex);
+            break;
+        }
+        if (!encoder || !encoder_ctx) {
+            log_error("UVC: encoder not initialized");
+            pthread_mutex_lock(&uvc_mutex);
+            uvc_running = 0;
+            pthread_mutex_unlock(&uvc_mutex);
+            break;
+        }
+        if (buf.flags & V4L2_BUF_FLAG_ERROR) {
+            warn_uvc_once_per_sec("buffer error flag set, dropping frame");
+            goto requeue;
+        }
+        if (buf.bytesused == 0) {
+            warn_uvc_once_per_sec("empty frame bytesused=0, dropping");
+            goto requeue;
+        }
+        if (buf.bytesused > uvc_buffers[buf.index].length) {
+            warn_uvc_once_per_sec("bytesused exceeds buffer length, dropping");
+            goto requeue;
+        }
+        if (uvc_warmup_frames > 0) {
+            if (uvc_warmup_frames == uvc_warmup_frames_default) {
+                log_info("UVC: warmup active, dropping %d frames", uvc_warmup_frames_default);
+            }
+            uvc_warmup_frames--;
+            goto requeue;
         }
 
         if (uvc_pixfmt == V4L2_PIX_FMT_MJPEG) {
@@ -337,33 +469,13 @@ static void* uvc_thread_main(void* arg) {
             if (use_mpp_decoder) {
                 unsigned char* mjpg_ptr = (unsigned char*)uvc_buffers[buf.index].start;
                 unsigned long mjpg_size = buf.bytesused;
-                
-                // Debug: log first few frames to diagnose format issues
-                static int debug_frame_count = 0;
-                if (debug_frame_count < 5) {
-                    log_info("UVC: MJPEG frame #%d, size=%lu, first 32 bytes:", debug_frame_count, mjpg_size);
-                    char hex_buf[256] = {0};
-                    int hex_len = 0;
-                    for (int i = 0; i < 32 && i < (int)mjpg_size; i++) {
-                        hex_len += snprintf(hex_buf + hex_len, sizeof(hex_buf) - hex_len, "%02X ", mjpg_ptr[i]);
-                    }
-                    log_info("UVC:   %s", hex_buf);
-                    
-                    // Check for common UVC payload headers
-                    if (mjpg_size > 12 && mjpg_ptr[0] == 0x0C && mjpg_ptr[1] == 0x00) {
-                        log_info("UVC: Detected potential 12-byte UVC header (0x0C 0x00 ...)");
-                    }
-                    debug_frame_count++;
-                }
-                
+
                 dec_mppjpeg_frame_t dec_frame = {0};
                 int dr = dec_mppjpeg_decode_zero_copy(mjpg_ptr, mjpg_size, &dec_frame);
-                if (dr != 0) { 
-                    if (debug_frame_count <= 5) {
-                        log_warn("UVC: mppjpeg zero-copy decode failed (frame #%d, size=%lu)", debug_frame_count-1, mjpg_size); 
-                    }
-                    (void)xioctl(uvc_fd, VIDIOC_QBUF, &buf); 
-                    continue; 
+                if (dr != 0) {
+                    warn_uvc_once_per_sec("mppjpeg zero-copy decode failed, dropping");
+                    (void)xioctl(uvc_fd, VIDIOC_QBUF, &buf);
+                    continue;
                 }
                 
                 int iw = dec_frame.width;
@@ -385,17 +497,51 @@ static void* uvc_thread_main(void* arg) {
                 
                 // ⭐ 零拷贝：传递解码器的 stride 信息（关键优化）
                 video_frame_t frame = {0};
-                frame.data = dec_frame.data_ptr;
-                frame.size = (size_t)dec_frame.hor_stride * dec_frame.ver_stride * 3 / 2;
-                frame.format = PIXEL_FORMAT_NV12;
-                frame.width = iw;
-                frame.height = ih;
-                frame.stride_y = dec_frame.hor_stride;
-                frame.stride_uv = dec_frame.hor_stride;
-                frame.pts_us = 0;
-                // 把 MPP 原生句柄传给编码器，允许零拷贝
-                frame.rk_mpp_frame = dec_frame.mpp_frame;
-                frame.rk_mpp_buffer = dec_frame.mpp_buffer;
+                if (encoder_input_fmt == PIXEL_FORMAT_I420) {
+                    size_t needed = (size_t)iw * (size_t)ih * 3 / 2;
+                    if (yuv_buf_size < needed) {
+                        unsigned char *nb = (unsigned char*)realloc(yuv_buf, needed);
+                        if (!nb) {
+                            log_error("UVC: realloc yuv_buf failed for MPP decode");
+                            (void)xioctl(uvc_fd, VIDIOC_QBUF, &buf);
+                            continue;
+                        }
+                        yuv_buf = nb;
+                        yuv_buf_size = needed;
+                    }
+                    const unsigned char *src_y = (const unsigned char*)dec_frame.data_ptr;
+                    const unsigned char *src_uv = (const unsigned char*)dec_frame.data_ptr +
+                        ((size_t)dec_frame.hor_stride * (size_t)dec_frame.ver_stride);
+                    unsigned char *dst_y = yuv_buf;
+                    unsigned char *dst_u = dst_y + (size_t)iw * (size_t)ih;
+                    unsigned char *dst_v = dst_u + ((size_t)iw / 2) * ((size_t)ih / 2);
+                    NV12ToI420(src_y, dec_frame.hor_stride,
+                               src_uv, dec_frame.hor_stride,
+                               dst_y, iw,
+                               dst_u, iw / 2,
+                               dst_v, iw / 2,
+                               iw, ih);
+                    frame.data = yuv_buf;
+                    frame.size = needed;
+                    frame.format = PIXEL_FORMAT_I420;
+                    frame.width = iw;
+                    frame.height = ih;
+                    frame.stride_y = iw;
+                    frame.stride_uv = iw / 2;
+                    frame.pts_us = 0;
+                } else {
+                    frame.data = dec_frame.data_ptr;
+                    frame.size = (size_t)dec_frame.hor_stride * dec_frame.ver_stride * 3 / 2;
+                    frame.format = PIXEL_FORMAT_NV12;
+                    frame.width = iw;
+                    frame.height = ih;
+                    frame.stride_y = dec_frame.hor_stride;
+                    frame.stride_uv = dec_frame.hor_stride;
+                    frame.pts_us = 0;
+                    // 把 MPP 原生句柄传给编码器，允许零拷贝
+                    frame.rk_mpp_frame = dec_frame.mpp_frame;
+                    frame.rk_mpp_buffer = dec_frame.mpp_buffer;
+                }
                 
                 encoded_packet_t packet = {0};
                 int enc_ret = encoder->encode(encoder_ctx, &frame, &packet);
@@ -410,16 +556,55 @@ static void* uvc_thread_main(void* arg) {
 #endif
             unsigned char* mjpg_ptr = (unsigned char*)uvc_buffers[buf.index].start;
             unsigned long mjpg_size = buf.bytesused;
+            if (mjpeg_subsamp >= 0 && (!yuv_src || yuv_src_size == 0)) {
+                log_warn("UVC: MJPEG state lost, reinitializing decoder buffers");
+                mjpeg_subsamp = -1;
+                mjpeg_colorspace = -1;
+            }
+            if (!tj) {
+                warn_uvc_once_per_sec("TurboJPEG handle not initialized, dropping");
+                goto requeue;
+            }
+            if (mjpg_size < 2) {
+                warn_uvc_once_per_sec("MJPEG frame too small, dropping");
+                goto requeue;
+            }
+            unsigned int hdr_len = mjpg_ptr[0];
+            if (hdr_len >= 2 && hdr_len <= 64 && hdr_len + 1 < mjpg_size) {
+                if (mjpg_ptr[1] & 0x40) {
+                    warn_uvc_once_per_sec("MJPEG payload error flag set, dropping");
+                    goto requeue;
+                }
+            }
+            int jpeg_offset = find_jpeg_start(mjpg_ptr, mjpg_size);
+            if (jpeg_offset > 0) {
+                log_debug("UVC: skipping %d-byte MJPEG header", jpeg_offset);
+                mjpg_ptr += jpeg_offset;
+                mjpg_size -= (unsigned long)jpeg_offset;
+            } else if (jpeg_offset < 0) {
+                log_warn("UVC: MJPEG frame missing SOI marker, dropping");
+                (void)xioctl(uvc_fd, VIDIOC_QBUF, &buf);
+                continue;
+            }
+            if (!has_jpeg_eoi(mjpg_ptr, mjpg_size)) {
+                warn_uvc_once_per_sec("MJPEG frame missing EOI marker, dropping");
+                goto requeue;
+            }
             int flags = 0;
             // Parse subsampling on first frame and allocate buffers accordingly
             int iw=uvc_width, ih=uvc_height; // image width/height from header
             if (mjpeg_subsamp < 0) {
                 int subs=0, cs=0;
                 if (tjDecompressHeader3(tj, mjpg_ptr, mjpg_size, &iw, &ih, &subs, &cs) != 0) {
+                    tj_fail_count++;
                     warn_tj_once_per_sec();
+                    if (tj_fail_count >= tj_fail_threshold) {
+                        reset_turbojpeg_state("header decode failed");
+                    }
                     (void)xioctl(uvc_fd, VIDIOC_QBUF, &buf);
                     continue;
                 }
+                tj_fail_count = 0;
                 mjpeg_subsamp = subs; mjpeg_colorspace = cs;
                 // If device ignored S_FMT and delivered different size, adapt encoder/buffers
                 if (iw != uvc_width || ih != uvc_height) {
@@ -442,23 +627,40 @@ static void* uvc_thread_main(void* arg) {
                 if (!yuv_buf) {
                     yuv_buf_size = (size_t)uvc_width * (size_t)uvc_height * 3 / 2;
                     yuv_buf = (unsigned char*)malloc(yuv_buf_size);
-                    if (!yuv_buf) { log_error("UVC: malloc yuv_buf failed"); break; }
+                    if (!yuv_buf) {
+                        log_error("UVC: malloc yuv_buf failed");
+                        pthread_mutex_lock(&uvc_mutex);
+                        uvc_running = 0;
+                        pthread_mutex_unlock(&uvc_mutex);
+                        break;
+                    }
                 }
                 // Always allocate yuv_src for TurboJPEG YUV output regardless of subsampling
                 // so that tjDecompressToYUV2 always has a valid destination.
                 if (yuv_src) { free(yuv_src); yuv_src = NULL; }
                 yuv_src_size = tjBufSizeYUV2(iw, 1, ih, mjpeg_subsamp);
                 yuv_src = (unsigned char*)malloc(yuv_src_size);
-                if (!yuv_src) { log_error("UVC: malloc yuv_src failed"); break; }
+                if (!yuv_src) {
+                    log_error("UVC: malloc yuv_src failed");
+                    pthread_mutex_lock(&uvc_mutex);
+                    uvc_running = 0;
+                    pthread_mutex_unlock(&uvc_mutex);
+                    break;
+                }
                 log_info("UVC: MJPEG subsamp=%d colorspace=%d", mjpeg_subsamp, mjpeg_colorspace);
             }
             // Decompress with actual header size (iw/ih); if not known (subsample already set), assume uvc_width/height
             if (mjpeg_subsamp >= 0) { iw = uvc_width; ih = uvc_height; }
             if (tjDecompressToYUV2(tj, mjpg_ptr, mjpg_size, yuv_src, iw, 1, ih, flags) != 0) {
+                tj_fail_count++;
                 warn_tj_once_per_sec();
+                if (tj_fail_count >= tj_fail_threshold) {
+                    reset_turbojpeg_state("decode failed");
+                }
                 (void)xioctl(uvc_fd, VIDIOC_QBUF, &buf);
                 continue;
             }
+            tj_fail_count = 0;
             // Convert to I420 in yuv_buf
             unsigned char* Yd = yuv_buf;
             unsigned char* Ud = Yd + uvc_width * uvc_height;
@@ -507,6 +709,12 @@ static void* uvc_thread_main(void* arg) {
                 }
             }
         } else if (uvc_pixfmt == V4L2_PIX_FMT_YUYV) {
+            size_t expected_size = (size_t)uvc_width * (size_t)uvc_height * 2;
+            if (buf.bytesused < expected_size || uvc_buffers[buf.index].length < expected_size) {
+                log_warn("UVC: short YUYV frame bytesused=%u expected=%zu buf_len=%zu",
+                         buf.bytesused, expected_size, uvc_buffers[buf.index].length);
+                goto requeue;
+            }
             // YUYV → MPP 直通（零转换）
             if (encoder_input_fmt == PIXEL_FORMAT_YUYV) {
                 const unsigned char *yuyv = (const unsigned char*)uvc_buffers[buf.index].start;
@@ -534,11 +742,28 @@ static void* uvc_thread_main(void* arg) {
             
             // libyuv CPU 转换
             const unsigned char *yuyv = (const unsigned char*)uvc_buffers[buf.index].start;
+            if (!yuv_buf) {
+                yuv_buf_size = (size_t)uvc_width * (size_t)uvc_height * 3 / 2;
+                yuv_buf = (unsigned char*)malloc(yuv_buf_size);
+                if (!yuv_buf) {
+                    log_error("UVC: malloc yuv_buf failed");
+                    pthread_mutex_lock(&uvc_mutex);
+                    uvc_running = 0;
+                    pthread_mutex_unlock(&uvc_mutex);
+                    break;
+                }
+            }
             unsigned char* Y = yuv_buf;
             unsigned char* U = Y + uvc_width * uvc_height;
             unsigned char* V = U + (uvc_width/2) * (uvc_height/2);
             yuyv_to_i420(yuyv, uvc_width, uvc_height, Y, U, V, uvc_width, uvc_width/2);
         } else if (uvc_pixfmt == V4L2_PIX_FMT_NV12) {
+            size_t expected_size = (size_t)uvc_width * (size_t)uvc_height * 3 / 2;
+            if (buf.bytesused < expected_size || uvc_buffers[buf.index].length < expected_size) {
+                log_warn("UVC: short NV12 frame bytesused=%u expected=%zu buf_len=%zu",
+                         buf.bytesused, expected_size, uvc_buffers[buf.index].length);
+                goto requeue;
+            }
             if (encoder_input_fmt == PIXEL_FORMAT_NV12) {
                 const unsigned char *nv12 = (const unsigned char*)uvc_buffers[buf.index].start;
                 
@@ -565,6 +790,17 @@ static void* uvc_thread_main(void* arg) {
             
             // x264 需要 I420，执行转换
             const unsigned char *nv12 = (const unsigned char*)uvc_buffers[buf.index].start;
+            if (!yuv_buf) {
+                yuv_buf_size = (size_t)uvc_width * (size_t)uvc_height * 3 / 2;
+                yuv_buf = (unsigned char*)malloc(yuv_buf_size);
+                if (!yuv_buf) {
+                    log_error("UVC: malloc yuv_buf failed");
+                    pthread_mutex_lock(&uvc_mutex);
+                    uvc_running = 0;
+                    pthread_mutex_unlock(&uvc_mutex);
+                    break;
+                }
+            }
             unsigned char* Y = yuv_buf;
             unsigned char* U = Y + uvc_width * uvc_height;
             unsigned char* V = U + (uvc_width/2) * (uvc_height/2);
@@ -584,7 +820,13 @@ static void* uvc_thread_main(void* arg) {
         // 确保编码器buffer足够大
         if (encoder_buf_size < frame_size) {
             unsigned char *nb = (unsigned char*)realloc(encoder_buf, frame_size);
-            if (!nb) { log_error("UVC: alloc encoder_buf failed"); break; }
+            if (!nb) {
+                log_error("UVC: alloc encoder_buf failed");
+                pthread_mutex_lock(&uvc_mutex);
+                uvc_running = 0;
+                pthread_mutex_unlock(&uvc_mutex);
+                break;
+            }
             encoder_buf = nb; encoder_buf_size = frame_size;
         }
         
@@ -625,14 +867,27 @@ static void* uvc_thread_main(void* arg) {
 requeue:
         if (xioctl(uvc_fd, VIDIOC_QBUF, &buf) < 0) {
             log_error("UVC: VIDIOC_QBUF failed: %s", strerror(errno));
+            pthread_mutex_lock(&uvc_mutex);
+            uvc_running = 0;
+            pthread_mutex_unlock(&uvc_mutex);
             break;
         }
     }
+    pthread_mutex_lock(&uvc_mutex);
+    uvc_running = 0;
+    pthread_mutex_unlock(&uvc_mutex);
     log_info("UVC: streaming thread exiting");
     return NULL;
 }
 
 int uvc_init_from_env() {
+    if (uvc_initialized) {
+        log_warn("UVC: init called while already initialized");
+        return 0;
+    }
+    mjpeg_subsamp = -1;
+    mjpeg_colorspace = -1;
+
     const char* s;
     s = getenv("JETKVM_UVC_DEVICE"); if (s && s[0]) { strncpy(uvc_dev_path, s, sizeof(uvc_dev_path)-1); uvc_dev_path[sizeof(uvc_dev_path)-1] = '\0'; }
     s = getenv("JETKVM_UVC_WIDTH"); if (s) { int v = atoi(s); if (v>0) uvc_width = v; }
@@ -657,6 +912,20 @@ int uvc_init_from_env() {
     s = getenv("JETKVM_X264_PRESET"); if (s && s[0]) { strncpy(x264_preset, s, sizeof(x264_preset)-1); }
     s = getenv("JETKVM_X264_TUNE"); if (s && s[0]) { strncpy(x264_tune, s, sizeof(x264_tune)-1); }
     s = getenv("JETKVM_X264_PROFILE"); if (s && s[0]) { strncpy(x264_profile, s, sizeof(x264_profile)-1); }
+    s = getenv("JETKVM_UVC_WARMUP_FRAMES");
+    if (s && s[0]) {
+        int v = atoi(s);
+        if (v >= 0) {
+            uvc_warmup_frames_default = v;
+        }
+    }
+    s = getenv("JETKVM_TJ_RESET_FAILS");
+    if (s && s[0]) {
+        int v = atoi(s);
+        if (v > 0) {
+            tj_fail_threshold = v;
+        }
+    }
     // 编码器选择：通过JETKVM_ENCODER环境变量（"x264" 或 "mpp"）
     s = getenv("JETKVM_ENCODER");
     if (s && s[0]) {
@@ -688,7 +957,7 @@ int uvc_init_from_env() {
     if (uvc_open_device() < 0) return -1;
     
     // Set format first - this may change uvc_pixfmt if device doesn't support requested format
-    if (uvc_set_format() < 0) return -1;
+    if (uvc_set_format() < 0) { uvc_shutdown(); return -1; }
     
     // Now initialize decoders based on ACTUAL format returned by device
     if (uvc_pixfmt == V4L2_PIX_FMT_MJPEG) {
@@ -698,12 +967,14 @@ int uvc_init_from_env() {
             log_info("UVC: Using MPP JPEG decoder");
             if (dec_mppjpeg_init(uvc_width, uvc_height) < 0) {
                 log_error("UVC: Failed to init MPP JPEG decoder");
+                uvc_shutdown();
                 return -1;
             }
         } else {
             log_info("UVC: Using TurboJPEG software decoder");
             if (init_turbojpeg() < 0) {
                 log_error("UVC: Failed to init TurboJPEG decoder");
+                uvc_shutdown();
                 return -1;
             }
         }
@@ -711,6 +982,7 @@ int uvc_init_from_env() {
         log_info("UVC: Using TurboJPEG software decoder");
         if (init_turbojpeg() < 0) {
             log_error("UVC: Failed to init TurboJPEG decoder");
+            uvc_shutdown();
             return -1;
         }
 #endif
@@ -720,6 +992,7 @@ int uvc_init_from_env() {
         yuv_buf = (unsigned char*)malloc(yuv_buf_size);
         if (!yuv_buf) {
             log_error("UVC: Failed to allocate YUV conversion buffer");
+            uvc_shutdown();
             return -1;
         }
     } else if (uvc_pixfmt == V4L2_PIX_FMT_NV12) {
@@ -728,18 +1001,21 @@ int uvc_init_from_env() {
         yuv_buf = (unsigned char*)malloc(yuv_buf_size);
         if (!yuv_buf) {
             log_error("UVC: Failed to allocate YUV conversion buffer");
+            uvc_shutdown();
             return -1;
         }
     } else {
         log_error("UVC: Unsupported pixel format 0x%08X", uvc_pixfmt);
+        uvc_shutdown();
         return -1;
     }
     
-    if (uvc_init_mmap() < 0) return -1;
+    if (uvc_init_mmap() < 0) { uvc_shutdown(); return -1; }
     
     // 统一初始化编码器
     if (init_encoder() < 0) {
         log_error("UVC: init encoder failed");
+        uvc_shutdown();
         return -1;
     }
     
@@ -748,6 +1024,8 @@ int uvc_init_from_env() {
     else if (uvc_pixfmt == V4L2_PIX_FMT_YUYV) fmt_name = "YUYV";
     else if (uvc_pixfmt == V4L2_PIX_FMT_NV12) fmt_name = "NV12";
 
+    uvc_initialized = 1;
+    uvc_warmup_frames = uvc_warmup_frames_default;
     log_info("UVC: initialized device=%s %dx%d@%dfps fmt=%s encoder=%s bitrate=%dkbps",
              uvc_dev_path, uvc_width, uvc_height, uvc_fps,
              fmt_name, encoder->name, bitrate_kbps);
@@ -759,20 +1037,29 @@ int uvc_init_from_env() {
 int uvc_start_streaming() {
     pthread_mutex_lock(&uvc_mutex);
     if (uvc_running) { pthread_mutex_unlock(&uvc_mutex); return 0; }
+    uvc_warmup_frames = uvc_warmup_frames_default;
     uvc_running = 1;
     int rc = pthread_create(&uvc_thread, NULL, uvc_thread_main, NULL);
     if (rc != 0) { uvc_running = 0; log_error("UVC: pthread_create failed: %s", strerror(rc)); }
+    if (rc == 0) {
+        uvc_thread_started = 1;
+    }
     pthread_mutex_unlock(&uvc_mutex);
     return rc == 0 ? 0 : -1;
 }
 
 void uvc_stop_streaming() {
     pthread_mutex_lock(&uvc_mutex);
-    if (!uvc_running) { pthread_mutex_unlock(&uvc_mutex); return; }
+    if (!uvc_running && !uvc_thread_started) { pthread_mutex_unlock(&uvc_mutex); return; }
     uvc_running = 0;
     pthread_mutex_unlock(&uvc_mutex);
-    // Wake the thread by select timeout; then join
-    pthread_join(uvc_thread, NULL);
+    if (uvc_thread_started) {
+        // Wake the thread by select timeout; then join
+        pthread_join(uvc_thread, NULL);
+        pthread_mutex_lock(&uvc_mutex);
+        uvc_thread_started = 0;
+        pthread_mutex_unlock(&uvc_mutex);
+    }
 }
 
 int uvc_is_streaming() {
@@ -784,6 +1071,11 @@ int uvc_is_streaming() {
 }
 
 void uvc_shutdown() {
+    if (!uvc_initialized) {
+        log_warn("UVC: shutdown called while not initialized");
+        return;
+    }
+
     uvc_stop_streaming();
     
     // 统一销毁编码器
@@ -807,6 +1099,12 @@ void uvc_shutdown() {
     // 释放缓冲区
     if (yuv_buf) { free(yuv_buf); yuv_buf = NULL; }
     if (yuv_src) { free(yuv_src); yuv_src = NULL; }
+    yuv_buf_size = 0;
+    yuv_src_size = 0;
+    mjpeg_subsamp = -1;
+    mjpeg_colorspace = -1;
+    tj_fail_count = 0;
+    uvc_warmup_frames = 0;
     
     // 关闭V4L2设备
     if (uvc_fd >= 0) {
@@ -823,6 +1121,8 @@ void uvc_shutdown() {
         close(uvc_fd); 
         uvc_fd = -1;
     }
+
+    uvc_initialized = 0;
     
     log_info("UVC: shutdown completed");
 }

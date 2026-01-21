@@ -64,7 +64,7 @@ int jetkvm_video_init(float factor) { return video_init(factor); }
 void jetkvm_video_shutdown() { video_shutdown(); }
 void jetkvm_video_start() { video_start_streaming(); }
 void jetkvm_video_stop() { video_stop_streaming(); }
-uint8_t jetkvm_video_get_streaming_status() { return 0; }
+uint8_t jetkvm_video_get_streaming_status() { return video_get_streaming_status(); }
 int jetkvm_video_set_quality_factor(float factor) { video_set_quality_factor(factor); return 0; }
 float jetkvm_video_get_quality_factor() { return video_get_quality_factor(); }
 

@@ -2,6 +2,7 @@ package native
 
 import (
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +24,8 @@ type Native struct {
 	onIndevEvent         func(event string)
 	onRpcEvent           func(event string)
 	sleepModeSupported   bool
+	uvcBackend           bool
+	uvcSleepEnabled      bool
 	videoLock            sync.Mutex
 	screenLock           sync.Mutex
 	extraLock            sync.Mutex
@@ -63,6 +66,14 @@ func (s VideoStreamingStatus) String() string {
 	return "unknown"
 }
 
+func isUvcBackendFromEnv() bool {
+	backend := strings.ToLower(strings.TrimSpace(os.Getenv("JETKVM_VIDEO_BACKEND")))
+	if backend == "uvc" {
+		return true
+	}
+	return os.Getenv("JETKVM_UVC_DEVICE") != ""
+}
+
 func NewNative(opts NativeOptions) *Native {
 	pid := os.Getpid()
 	nativeSubLogger := nativeLogger.With().Int("pid", pid).Str("scope", "native").Logger()
@@ -96,7 +107,8 @@ func NewNative(opts NativeOptions) *Native {
 		}
 	}
 
-	sleepModeSupported := isSleepModeSupported()
+	uvcBackend := isUvcBackendFromEnv()
+	sleepModeSupported := isSleepModeSupported() || uvcBackend
 
 	defaultQualityFactor := opts.DefaultQualityFactor
 	if defaultQualityFactor <= 0 || defaultQualityFactor > 1 {
@@ -116,6 +128,7 @@ func NewNative(opts NativeOptions) *Native {
 		onIndevEvent:         onIndevEvent,
 		onRpcEvent:           onRpcEvent,
 		sleepModeSupported:   sleepModeSupported,
+		uvcBackend:           uvcBackend,
 		videoLock:            sync.Mutex{},
 		screenLock:           sync.Mutex{},
 	}

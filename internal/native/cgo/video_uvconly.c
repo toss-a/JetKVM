@@ -1,11 +1,13 @@
 #include "uvc_backend.h"
 #include "video.h"
 #include "log.h"
+#include "crash_handler.h"
 #include <stdint.h>
 
 static float quality_factor = 1.0f; // placeholder (not used in UVC-only)
 
 int video_init(float factor) {
+    jetkvm_crash_handler_init();
     if (factor > 0 && factor <= 1) {
         quality_factor = factor;
     }

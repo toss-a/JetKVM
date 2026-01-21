@@ -12,6 +12,7 @@ import (
 
 	"github.com/caarlos0/env/v11"
 	"github.com/erikdubbelboer/gspt"
+	"github.com/jetkvm/kvm/internal/logging"
 	"github.com/rs/zerolog"
 )
 
@@ -78,6 +79,9 @@ func updateProcessTitle(state *VideoState) {
 func RunNativeProcess(binaryName string) {
 	appCtx, appCtxCancel := context.WithCancel(context.Background())
 	defer appCtxCancel()
+
+	// Apply log level from environment in native process.
+	logging.GetRootLogger().UpdateLogLevel("")
 
 	logger := nativeLogger.With().Int("pid", os.Getpid()).Logger()
 	setProcTitle("starting")

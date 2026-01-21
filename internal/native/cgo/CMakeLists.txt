@@ -87,6 +87,7 @@ add_library(jknative STATIC ${sources} ${CMAKE_CURRENT_SOURCE_DIR}/ctrl.h)
 
 # Include directories
 target_include_directories(jknative PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/deps/libgpiod/include)
+target_compile_definitions(jknative PRIVATE LOG_LEVEL=LEVEL_TRACE)
 if(USE_LVGL)
     target_include_directories(jknative PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/ui)
 endif()

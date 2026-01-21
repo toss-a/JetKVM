@@ -49,6 +49,43 @@ func (n *Native) waitForVideoStreamingStatus(status VideoStreamingStatus) error 
 
 // before calling this function, make sure to lock n.videoLock
 func (n *Native) setSleepMode(enabled bool) error {
+	if n.uvcBackend {
+		if enabled {
+			if n.uvcSleepEnabled {
+				return nil
+			}
+			switch videoGetStreamingStatus() {
+			case VideoStreamingStatusActive:
+				n.l.Info().Msg("stopping video stream to enable UVC sleep mode")
+				videoStop()
+			case VideoStreamingStatusStopping:
+				n.l.Info().Msg("video stream is stopping, will enable UVC sleep mode in a few seconds")
+			}
+
+			if err := n.waitForVideoStreamingStatus(VideoStreamingStatusInactive); err != nil {
+				n.l.Error().Err(err).Msg("timeout waiting for UVC stream to stop before sleep")
+				return err
+			}
+
+			n.l.Info().Msg("shutting down UVC video device for sleep mode")
+			videoShutdown()
+			n.uvcSleepEnabled = true
+			return nil
+		}
+
+		if !n.uvcSleepEnabled {
+			return nil
+		}
+
+		n.l.Info().Msg("waking UVC video device from sleep mode")
+		if err := videoInit(n.defaultQualityFactor); err != nil {
+			n.l.Error().Err(err).Msg("failed to reinitialize UVC backend after sleep")
+			return err
+		}
+		n.uvcSleepEnabled = false
+		return nil
+	}
+
 	if !n.sleepModeSupported {
 		return nil
 	}
@@ -79,6 +116,10 @@ func (n *Native) setSleepMode(enabled bool) error {
 }
 
 func (n *Native) getSleepMode() (bool, error) {
+	if n.uvcBackend {
+		return n.uvcSleepEnabled, nil
+	}
+
 	if !n.sleepModeSupported {
 		return false, nil
 	}
@@ -193,7 +234,9 @@ func (n *Native) VideoStart() error {
 	defer n.videoLock.Unlock()
 
 	// disable sleep mode before starting video
-	_ = n.setSleepMode(false)
+	if err := n.setSleepMode(false); err != nil {
+		return err
+	}
 
 	videoStart()
 	return nil
